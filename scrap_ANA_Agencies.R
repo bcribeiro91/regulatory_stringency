@@ -154,29 +154,18 @@ get_visible_rows <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
 
-      // ── Clean text from a gridcell ────────────────────────────────────────────
-      // Power BI puts the display value in a child span[title] attribute.
-      // Using title avoids capturing hidden accessibility/tooltip text that bleeds
-      // into innerText and causes values from adjacent columns to appear merged
-      // (e.g. "Cuiabá\n61270471000104" appearing as a single cell value).
       function cellText(el) {
-        // 1. child span with non-empty title attribute (untruncated clean value)
         var spans = el.querySelectorAll("span[title]");
         for (var si = 0; si < spans.length; si++) {
           var tv = (spans[si].getAttribute("title") || "").trim();
           if (tv.length > 0) return tv;
         }
-        // 2. title on the cell element itself
         var ct = (el.getAttribute("title") || "").trim();
         if (ct.length > 0) return ct;
-        // 3. first child element text (avoids sibling tooltip elements)
         if (el.firstElementChild) {
           var ft = (el.firstElementChild.innerText || "").trim();
           if (ft.length > 0) return ft;
         }
-        // 4. last resort: first non-empty line of full innerText
-        // Note: use String.fromCharCode(10) instead of "\n" because R interprets
-        // \n inside single-quoted strings as a real newline before passing to JS.
         var lines = (el.innerText || "").split(String.fromCharCode(10));
         for (var li = 0; li < lines.length; li++) {
           var ln = lines[li].trim();
@@ -235,6 +224,10 @@ get_visible_rows <- function(b) {
     })()
   ')
 
+  if (is.null(res$result$value)) {
+    msg <- tryCatch(res$exceptionDetails$exception$description, error = function(e) "unknown JS error")
+    stop("get_visible_rows JS error: ", msg)
+  }
   parsed <- fromJSON(res$result$value)
   if (length(parsed) == 0) return(matrix(character(0), nrow = 0, ncol = 0))
 
