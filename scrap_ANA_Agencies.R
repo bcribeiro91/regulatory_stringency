@@ -6,7 +6,7 @@ library(chromote)
 library(jsonlite)
 
 # ── 1. CONNECT TO BROWSER ─────────────────────────────────────────────────────
-PBI_URL <- "https://app.powerbi.com/view?r=eyJrIjoiYWY2NDlhZjktNjZlYy00ZjE3LThmZGYtODUyNjA4OGUwYzU2IiwidCI6ImUwYmI0MDEyLTgxMGItNDY5YS04YjRkLTY2N2ZjZDFiYWY4OCJ9"
+PBI_URL <- "https://app.powerbi.com/view?r=eyJrIjoiYWY2NDlhZjktNjZlYy00ZjE3LThmZGYtODUyNjA4OGUwYzU2IiwidCI6ImUwYmI0MDEyLTgxMGItNDY5YS04YjRkLTY2N2ZjZDFiYWY4OCJ9&pageName=ReportSectione2a118ad60b5488ab805"
 
 if (!exists("b") || !inherits(b, "ChromoteSession")) {
   b <- ChromoteSession$new()
@@ -189,43 +189,24 @@ press_arrow_down <- function(b, n = 18) {
   Sys.sleep(1)
 }
 
-# ── 3. NAVIGATE TO THE "Serviços" TAB ────────────────────────────────────────
-# Try multiple selectors to find and click the tab, then verify the correct
-# table is loaded (confirmed by "Cód. IBGE" appearing in the column headers).
-res_nav <- b$Runtime$evaluate(expression = '
-  (function() {
-    var target = "Servi\u00e7os";   // "Serviços"
-    var selectors = ["[role=gridcell]","[role=button]","[role=tab]","button","div","span"];
-    for (var si = 0; si < selectors.length; si++) {
-      var els = document.querySelectorAll(selectors[si]);
-      for (var i = 0; i < els.length; i++) {
-        var t = (els[i].innerText || els[i].textContent || "").trim();
-        if (t === target) {
-          els[i].dispatchEvent(new MouseEvent("mousedown", {bubbles: true, cancelable: true}));
-          els[i].dispatchEvent(new MouseEvent("mouseup",   {bubbles: true, cancelable: true}));
-          els[i].click();
-          return "clicked via " + selectors[si];
-        }
-      }
-    }
-    return "NOT FOUND — check selector";
-  })()
-')
-cat("Nav result:", res_nav$result$value, "\n")
-Sys.sleep(6)   # give Power BI time to render the new tab content
-
-# Verify we landed on the right page (look for "Cód. IBGE" in the DOM)
+# ── 3. VERIFY PAGE LOADED CORRECTLY ──────────────────────────────────────────
+# The URL now includes pageName= to land directly on the "Serviços" table.
+# Just confirm the right content is present before proceeding.
 res_verify <- b$Runtime$evaluate(expression = '
   (function() {
     var txt = document.body.innerText || "";
     return JSON.stringify({
-      on_servicos : txt.indexOf("Servi") >= 0,
-      has_cod_ibge: txt.indexOf("d. IBGE") >= 0,   // "Cód. IBGE"
+      has_cod_ibge: txt.indexOf("d. IBGE") >= 0,
       n_gridcells : document.querySelectorAll("[role=gridcell]").length
     });
   })()
 ')
 cat("Verificação:", res_verify$result$value, "\n")
+# If has_cod_ibge is false, wait a bit more and retry
+if (grepl('"has_cod_ibge":false', res_verify$result$value)) {
+  cat("Aguardando tabela carregar...\n")
+  Sys.sleep(8)
+}
 
 # ── 4. GET COLUMN HEADERS (for naming only) ───────────────────────────────────
 headers <- character(0)
