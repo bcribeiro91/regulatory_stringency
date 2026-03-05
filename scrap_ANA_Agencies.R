@@ -83,31 +83,45 @@ get_headers <- function(b) {
 ensure_focus <- function(b) {
   b$Runtime$evaluate(expression = '
     (function() {
-      // Count cells per y-position
-      var rowCounts = {};
+      // Collect cells with their vertical centre (same logic as get_visible_rows)
       var allCells = [];
       document.querySelectorAll("[role=gridcell]").forEach(function(el) {
         var t = (el.innerText || "").trim();
         var r = el.getBoundingClientRect();
         if (r.width > 0 && r.height > 0 && t !== "Select Row") {
-          var k = Math.round(r.top);
-          rowCounts[k] = (rowCounts[k] || 0) + 1;
-          allCells.push({el: el, top: k, text: t});
+          allCells.push({el: el, center: Math.round((r.top + r.bottom) / 2), text: t});
         }
       });
-      // Most common count per row = data columns
+      if (allCells.length === 0) return "no cells found";
+      allCells.sort(function(a, b) { return a.center - b.center; });
+
+      // Group into rows by centre (12px tolerance)
+      var rows = [], cur = [allCells[0]];
+      for (var i = 1; i < allCells.length; i++) {
+        if (Math.abs(allCells[i].center - cur[0].center) <= 12) {
+          cur.push(allCells[i]);
+        } else {
+          rows.push(cur);
+          cur = [allCells[i]];
+        }
+      }
+      rows.push(cur);
+
+      // Most common row length = data columns
       var freq = {};
-      Object.values(rowCounts).forEach(function(n) { freq[n] = (freq[n]||0)+1; });
+      rows.forEach(function(r) { var n = r.length; freq[n] = (freq[n]||0)+1; });
       var dataCols = parseInt(
         Object.keys(freq).sort(function(a,b){ return freq[b]-freq[a]; })[0]
       );
-      // Click the first cell that belongs to a full data row
-      for (var i = 0; i < allCells.length; i++) {
-        if (rowCounts[allCells[i].top] === dataCols) {
-          allCells[i].el.scrollIntoView({block: "nearest"});
-          allCells[i].el.focus();
-          allCells[i].el.click();
-          return "ok [" + dataCols + " cols]: " + allCells[i].text.substring(0,25);
+
+      // Click first cell of the first full data row
+      for (var j = 0; j < rows.length; j++) {
+        if (rows[j].length === dataCols) {
+          var cell = rows[j][0];
+          cell.el.scrollIntoView({block: "nearest"});
+          cell.el.focus();
+          cell.el.click();
+          return "ok [" + dataCols + " cols]: " + cell.text.substring(0, 25);
         }
       }
       return "no data cell found";
@@ -117,8 +131,8 @@ ensure_focus <- function(b) {
 }
 
 # Extract visible data rows as a character matrix.
-# Does NOT filter by a fixed column count in JS — instead returns all rows and
-# lets R pick the most common row length (= true data columns).
+# Uses the vertical CENTRE of each cell (not its top) for row grouping, so that
+# vertically-centred short cells in tall rows align correctly with their neighbours.
 get_visible_rows <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
@@ -127,14 +141,18 @@ get_visible_rows <- function(b) {
         var t = (el.innerText || "").trim();
         var rect = el.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0 && t !== "Select Row") {
-          cells.push({text: t, left: Math.round(rect.left), top: Math.round(rect.top)});
+          cells.push({
+            text  : t,
+            left  : Math.round(rect.left),
+            center: Math.round((rect.top + rect.bottom) / 2)
+          });
         }
       });
       if (cells.length === 0) return JSON.stringify([]);
-      cells.sort(function(a, b) { return a.top - b.top || a.left - b.left; });
+      cells.sort(function(a, b) { return a.center - b.center || a.left - b.left; });
       var rows = [], cur = [cells[0]];
       for (var i = 1; i < cells.length; i++) {
-        if (Math.abs(cells[i].top - cur[0].top) <= 5) {
+        if (Math.abs(cells[i].center - cur[0].center) <= 12) {
           cur.push(cells[i]);
         } else {
           cur.sort(function(a, b) { return a.left - b.left; });
@@ -286,7 +304,8 @@ cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
 
 # ── Column names ─────────────────────────────────────────────────────────────
 col_names_known <- c("Cod_IBGE", "UF", "Municipio", "CNPJ_ERI",
-                     "Nome_ERI", "Sigla_ERI", "Abrangencia_ERI", "Data_inicio")
+                     "Nome_ERI", "Sigla_ERI", "Abrangencia_ERI",
+                     "Data_inicio", "Data_validade")
 if (length(headers) == ncol(df)) {
   colnames(df) <- headers
 } else if (ncol(df) == length(col_names_known)) {
@@ -295,6 +314,9 @@ if (length(headers) == ncol(df)) {
   colnames(df) <- paste0("V", seq_len(ncol(df)))
   warning("Número de colunas (", ncol(df), ") não esperado. Renomear manualmente.")
 }
+
+# ── Replace Power BI "########" (column too narrow to show date) with NA ─────
+df[df == "########" | (nchar(df) >= 2 & grepl("^#{2,}$", df))] <- NA
 
 # ── Fix encoding (UTF-8 mojibake) ────────────────────────────────────────────
 df[] <- lapply(df, function(col) sapply(col, fix_encoding, USE.NAMES = FALSE))
