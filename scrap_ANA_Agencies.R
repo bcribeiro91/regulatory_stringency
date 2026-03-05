@@ -28,16 +28,33 @@ if (!exists("b") || !inherits(b, "ChromoteSession")) {
 
 # ── 2. HELPER FUNCTIONS ───────────────────────────────────────────────────────
 
-# Extract column headers from the table
+# Extract column headers from the table.
+# Filters by proximity to data rows to avoid picking up navigation tab headers.
 get_headers <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
+      // Find the y-position of the first visible data row
+      var cellTops = [];
+      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
+        var r = el.getBoundingClientRect();
+        var t = (el.innerText || "").trim();
+        if (r.width > 0 && r.height > 0 && t !== "Select Row") cellTops.push(r.top);
+      });
+      if (cellTops.length === 0) return JSON.stringify([]);
+      var firstDataY = Math.min.apply(null, cellTops);
+
+      // Only keep columnheaders that sit just above the first data row (within 120px)
       var headers = [];
       document.querySelectorAll("[role=columnheader]").forEach(function(el) {
+        var r = el.getBoundingClientRect();
         var t = (el.innerText || "").trim();
-        if (t.length > 0 && t !== "Select Row") headers.push(t);
+        if (r.width > 0 && r.height > 0 && t.length > 0 && t !== "Select Row" &&
+            r.top < firstDataY && r.top > firstDataY - 120) {
+          headers.push({text: t, left: r.left});
+        }
       });
-      return JSON.stringify(headers);
+      headers.sort(function(a, b) { return a.left - b.left; });
+      return JSON.stringify(headers.map(function(h) { return h.text; }));
     })()
   ')
   fromJSON(res$result$value)
@@ -128,10 +145,66 @@ press_arrow_down <- function(b, n = 18) {
 }
 
 # ── 3. DETECT COLUMN COUNT ───────────────────────────────────────────────────
-headers <- get_headers(b)
-n_cols  <- length(headers)
-cat("Colunas detectadas:", n_cols, "\n")
-cat(paste(headers, collapse = " | "), "\n\n")
+# Retry up to 5x — Power BI may still be rendering
+headers <- character(0)
+for (.attempt in 1:5) {
+  headers <- get_headers(b)
+  if (length(headers) > 0) break
+  cat("Tentativa", .attempt, "— aguardando headers...\n")
+  Sys.sleep(3)
+}
+
+# Fallback: infer column count from the most common gridcell count per row
+if (length(headers) == 0) {
+  cat("Headers não detectados via [role=columnheader]. Inferindo via gridcells...\n")
+  res_nc <- b$Runtime$evaluate(expression = '
+    (function() {
+      var tops = {};
+      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
+        var t = (el.innerText || "").trim();
+        var r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
+          var k = Math.round(r.top);
+          tops[k] = (tops[k] || 0) + 1;
+        }
+      });
+      var vals = Object.values(tops).sort(function(a,b){return b-a;});
+      return vals.length > 0 ? String(vals[0]) : "0";
+    })()
+  ')
+  n_cols  <- as.integer(res_nc$result$value)
+  headers <- paste0("V", seq_len(n_cols))
+  cat("Colunas inferidas:", n_cols, "\n")
+} else {
+  # Validate: infer n_cols from most common gridcell count per row
+  res_nc <- b$Runtime$evaluate(expression = '
+    (function() {
+      var tops = {};
+      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
+        var t = (el.innerText || "").trim();
+        var r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
+          var k = Math.round(r.top);
+          tops[k] = (tops[k] || 0) + 1;
+        }
+      });
+      var vals = Object.values(tops).sort(function(a,b){return b-a;});
+      return vals.length > 0 ? String(vals[0]) : "0";
+    })()
+  ')
+  inferred_cols <- as.integer(res_nc$result$value)
+
+  if (length(headers) != inferred_cols && inferred_cols > 0) {
+    cat("Aviso: headers detectados (", length(headers), ") != colunas visíveis (", inferred_cols, "). Usando colunas visíveis.\n")
+    n_cols  <- inferred_cols
+    headers <- paste0("V", seq_len(n_cols))
+  } else {
+    n_cols <- length(headers)
+  }
+  cat("Colunas:", n_cols, "| Headers:", paste(headers, collapse = " | "), "\n")
+}
+
+if (n_cols == 0) stop("Não foi possível detectar colunas — verifique se a tabela está carregada no browser.")
 
 # ── 4. SCROLL TO TOP AND SET INITIAL FOCUS ───────────────────────────────────
 b$Runtime$evaluate(expression = '
@@ -190,12 +263,23 @@ for (page in seq_len(max_pages)) {
 }
 
 # ── 6. CONSOLIDATE ───────────────────────────────────────────────────────────
-df_raw <- do.call(rbind, all_chunks)                         # stack all matrices
-df     <- as.data.frame(unique(df_raw), stringsAsFactors = FALSE)  # drop duplicates
+if (length(all_chunks) == 0) {
+  stop("Nenhum dado coletado. Chunks esperados com ", n_cols, " colunas. ",
+       "Verifique: (1) tabela visível no browser, (2) foco estabelecido na célula.")
+}
+
+df_raw <- do.call(rbind, all_chunks)
+df     <- as.data.frame(unique(df_raw), stringsAsFactors = FALSE)
+
+cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
+
+if (ncol(df) == 0) {
+  stop("Data frame sem colunas após consolidação — n_cols usado: ", n_cols)
+}
 
 colnames(df) <- if (length(headers) == ncol(df)) headers else paste0("V", seq_len(ncol(df)))
 
-cat("\nTotal de linhas únicas:", nrow(df), "\n")
+cat("Total de linhas únicas:", nrow(df), "\n")
 print(head(df, 10))
 
 # ── 7. EXPORT ─────────────────────────────────────────────────────────────────
