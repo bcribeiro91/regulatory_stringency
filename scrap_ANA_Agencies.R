@@ -14,7 +14,6 @@ if (!exists("b") || !inherits(b, "ChromoteSession")) {
   cat("Aguardando Power BI carregar...\n")
   Sys.sleep(12)
 } else {
-  # Try to reuse existing session; respawn if closed
   tryCatch(
     b$Runtime$evaluate(expression = "1"),
     error = function(e) {
@@ -28,22 +27,38 @@ if (!exists("b") || !inherits(b, "ChromoteSession")) {
 
 # ── 2. HELPER FUNCTIONS ───────────────────────────────────────────────────────
 
-# Extract column headers from the table.
-# Filters by proximity to data rows to avoid picking up navigation tab headers.
+# Extract column headers (used for naming only; not critical for row detection).
+# Looks for [role=columnheader] elements that are just above the LARGEST cluster
+# of gridcells (= the data table), ignoring summary cards and nav tabs.
 get_headers <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
-      // Find the y-position of the first visible data row
-      var cellTops = [];
+      // Count gridcells per y-position, excluding "Select Row"
+      var rowCounts = {};
       document.querySelectorAll("[role=gridcell]").forEach(function(el) {
-        var r = el.getBoundingClientRect();
         var t = (el.innerText || "").trim();
-        if (r.width > 0 && r.height > 0 && t !== "Select Row") cellTops.push(r.top);
+        var r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
+          var k = Math.round(r.top);
+          rowCounts[k] = (rowCounts[k] || 0) + 1;
+        }
       });
-      if (cellTops.length === 0) return JSON.stringify([]);
-      var firstDataY = Math.min.apply(null, cellTops);
 
-      // Only keep columnheaders that sit just above the first data row (within 120px)
+      // Find the most common cell count per row (= data columns)
+      var freq = {};
+      Object.values(rowCounts).forEach(function(n) { freq[n] = (freq[n] || 0) + 1; });
+      var dataCols = parseInt(Object.keys(freq).sort(function(a,b){
+        return freq[b]-freq[a];
+      })[0]);
+
+      // First y-position where a full data row appears
+      var dataYs = Object.keys(rowCounts)
+        .filter(function(y) { return rowCounts[y] === dataCols; })
+        .map(Number).sort(function(a,b){return a-b;});
+      if (dataYs.length === 0) return JSON.stringify([]);
+      var firstDataY = dataYs[0];
+
+      // Columnheaders just above the first data row (within 120px)
       var headers = [];
       document.querySelectorAll("[role=columnheader]").forEach(function(el) {
         var r = el.getBoundingClientRect();
@@ -60,7 +75,7 @@ get_headers <- function(b) {
   fromJSON(res$result$value)
 }
 
-# Click the first valid data cell to establish keyboard focus in the table
+# Click the first valid data cell to establish keyboard focus in the table.
 ensure_focus <- function(b) {
   b$Runtime$evaluate(expression = '
     (function() {
@@ -80,13 +95,12 @@ ensure_focus <- function(b) {
   Sys.sleep(0.4)
 }
 
-# Extract all visible rows as a character matrix (n_rows x n_cols).
-# n_cols: expected number of data columns (from get_headers).
-# Uses bounding-box positions to reconstruct row/column order robustly.
-get_visible_rows <- function(b, n_cols) {
-  js <- sprintf('
+# Extract visible data rows as a character matrix.
+# Does NOT filter by a fixed column count in JS — instead returns all rows and
+# lets R pick the most common row length (= true data columns).
+get_visible_rows <- function(b) {
+  res <- b$Runtime$evaluate(expression = '
     (function() {
-      var ncols = %d;
       var cells = [];
       document.querySelectorAll("[role=gridcell]").forEach(function(el) {
         var t = (el.innerText || "").trim();
@@ -109,25 +123,25 @@ get_visible_rows <- function(b, n_cols) {
       }
       cur.sort(function(a, b) { return a.left - b.left; });
       rows.push(cur.map(function(c) { return c.text; }));
-      return JSON.stringify(rows.filter(function(r) { return r.length === ncols; }));
+      return JSON.stringify(rows);
     })()
-  ', n_cols)
+  ')
 
-  res    <- b$Runtime$evaluate(expression = js)
   parsed <- fromJSON(res$result$value)
+  if (length(parsed) == 0) return(matrix(character(0), nrow = 0, ncol = 0))
 
-  # fromJSON returns a character matrix when all rows are the same length;
-  # otherwise it returns a list. Normalise to matrix either way.
-  if (length(parsed) == 0) {
-    return(matrix(character(0), nrow = 0, ncol = n_cols))
-  }
-  if (is.matrix(parsed)) {
-    return(parsed)
-  }
-  do.call(rbind, lapply(parsed, function(r) matrix(r, nrow = 1)))
+  # fromJSON returns a matrix when all rows have the same length — accept directly
+  if (is.matrix(parsed)) return(parsed)
+
+  # Mixed lengths (summary cards, nav tabs, data rows): keep only the most
+  # common row length, which corresponds to the actual data columns
+  row_lens   <- sapply(parsed, length)
+  target_len <- as.integer(names(sort(table(row_lens), decreasing = TRUE))[1])
+  data_rows  <- parsed[row_lens == target_len]
+  do.call(rbind, lapply(data_rows, function(r) matrix(r, nrow = 1)))
 }
 
-# Press ArrowDown n times to advance the virtual-scroll table
+# Press ArrowDown n times to advance the virtual-scroll table.
 press_arrow_down <- function(b, n = 18) {
   for (i in seq_len(n)) {
     b$Input$dispatchKeyEvent(
@@ -144,8 +158,7 @@ press_arrow_down <- function(b, n = 18) {
   Sys.sleep(1)
 }
 
-# ── 3. DETECT COLUMN COUNT ───────────────────────────────────────────────────
-# Retry up to 5x — Power BI may still be rendering
+# ── 3. GET COLUMN HEADERS (for naming only) ───────────────────────────────────
 headers <- character(0)
 for (.attempt in 1:5) {
   headers <- get_headers(b)
@@ -153,58 +166,8 @@ for (.attempt in 1:5) {
   cat("Tentativa", .attempt, "— aguardando headers...\n")
   Sys.sleep(3)
 }
-
-# Fallback: infer column count from the most common gridcell count per row
-if (length(headers) == 0) {
-  cat("Headers não detectados via [role=columnheader]. Inferindo via gridcells...\n")
-  res_nc <- b$Runtime$evaluate(expression = '
-    (function() {
-      var tops = {};
-      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
-        var t = (el.innerText || "").trim();
-        var r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
-          var k = Math.round(r.top);
-          tops[k] = (tops[k] || 0) + 1;
-        }
-      });
-      var vals = Object.values(tops).sort(function(a,b){return b-a;});
-      return vals.length > 0 ? String(vals[0]) : "0";
-    })()
-  ')
-  n_cols  <- as.integer(res_nc$result$value)
-  headers <- paste0("V", seq_len(n_cols))
-  cat("Colunas inferidas:", n_cols, "\n")
-} else {
-  # Validate: infer n_cols from most common gridcell count per row
-  res_nc <- b$Runtime$evaluate(expression = '
-    (function() {
-      var tops = {};
-      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
-        var t = (el.innerText || "").trim();
-        var r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
-          var k = Math.round(r.top);
-          tops[k] = (tops[k] || 0) + 1;
-        }
-      });
-      var vals = Object.values(tops).sort(function(a,b){return b-a;});
-      return vals.length > 0 ? String(vals[0]) : "0";
-    })()
-  ')
-  inferred_cols <- as.integer(res_nc$result$value)
-
-  if (length(headers) != inferred_cols && inferred_cols > 0) {
-    cat("Aviso: headers detectados (", length(headers), ") != colunas visíveis (", inferred_cols, "). Usando colunas visíveis.\n")
-    n_cols  <- inferred_cols
-    headers <- paste0("V", seq_len(n_cols))
-  } else {
-    n_cols <- length(headers)
-  }
-  cat("Colunas:", n_cols, "| Headers:", paste(headers, collapse = " | "), "\n")
-}
-
-if (n_cols == 0) stop("Não foi possível detectar colunas — verifique se a tabela está carregada no browser.")
+cat("Headers encontrados:", length(headers),
+    if (length(headers) > 0) paste0("| ", paste(headers, collapse = " | ")) else "", "\n")
 
 # ── 4. SCROLL TO TOP AND SET INITIAL FOCUS ───────────────────────────────────
 b$Runtime$evaluate(expression = '
@@ -222,30 +185,28 @@ Sys.sleep(1)
 
 # ── 5. MAIN SCRAPING LOOP ────────────────────────────────────────────────────
 all_chunks  <- list()
-prev_sig    <- ""   # fingerprint of the last visible row from the previous page
+prev_sig    <- ""
 stall_count <- 0
 max_pages   <- 1000
 
 for (page in seq_len(max_pages)) {
 
-  mat <- get_visible_rows(b, n_cols = n_cols)
+  mat <- get_visible_rows(b)   # auto-detects column count each call
 
   if (nrow(mat) == 0) {
     cat("Sem linhas visíveis na página", page, "— encerrando.\n")
     break
   }
 
-  # Fingerprint = all cells of the last visible row concatenated
   cur_sig <- paste(mat[nrow(mat), ], collapse = "|")
 
-  cat(sprintf("Pág %4d | %2d linhas | Col1 início: %-22s | Col1 fim: %-22s\n",
-              page, nrow(mat),
-              substr(mat[1,      1], 1, 22),
-              substr(mat[nrow(mat), 1], 1, 22)))
+  cat(sprintf("Pág %4d | %2d linhas | %d cols | Início: %-20s | Fim: %-20s\n",
+              page, nrow(mat), ncol(mat),
+              substr(mat[1,           1], 1, 20),
+              substr(mat[nrow(mat),   1], 1, 20)))
 
   all_chunks <- c(all_chunks, list(mat))
 
-  # End-of-table detection: last row unchanged for 2 consecutive pages
   if (cur_sig == prev_sig) {
     stall_count <- stall_count + 1
     if (stall_count >= 2) {
@@ -257,25 +218,19 @@ for (page in seq_len(max_pages)) {
   }
   prev_sig <- cur_sig
 
-  # Re-focus before every scroll to prevent ArrowDown from firing into void
   ensure_focus(b)
-  press_arrow_down(b, n = 18)   # 18-row advance; 2-row overlap handled by unique()
+  press_arrow_down(b, n = 18)
 }
 
 # ── 6. CONSOLIDATE ───────────────────────────────────────────────────────────
 if (length(all_chunks) == 0) {
-  stop("Nenhum dado coletado. Chunks esperados com ", n_cols, " colunas. ",
-       "Verifique: (1) tabela visível no browser, (2) foco estabelecido na célula.")
+  stop("Nenhum dado coletado. Verifique: (1) tabela visível no browser, (2) foco na célula.")
 }
 
 df_raw <- do.call(rbind, all_chunks)
 df     <- as.data.frame(unique(df_raw), stringsAsFactors = FALSE)
 
 cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
-
-if (ncol(df) == 0) {
-  stop("Data frame sem colunas após consolidação — n_cols usado: ", n_cols)
-}
 
 colnames(df) <- if (length(headers) == ncol(df)) headers else paste0("V", seq_len(ncol(df)))
 
