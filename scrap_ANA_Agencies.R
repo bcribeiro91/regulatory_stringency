@@ -75,21 +75,40 @@ get_headers <- function(b) {
   fromJSON(res$result$value)
 }
 
-# Click the first valid data cell to establish keyboard focus in the table.
+# Click the first cell of an actual DATA ROW (not summary cards or nav tabs).
+# Summary cards / nav tabs have fewer cells per row than the data table, so we
+# identify data rows as those matching the most common cells-per-row count.
 ensure_focus <- function(b) {
   b$Runtime$evaluate(expression = '
     (function() {
-      var cells = document.querySelectorAll("[role=gridcell]");
-      for (var i = 0; i < cells.length; i++) {
-        var t = (cells[i].innerText || "").trim();
-        if (t.length > 3 && t !== "Select Row") {
-          cells[i].scrollIntoView({block: "nearest"});
-          cells[i].focus();
-          cells[i].click();
-          return "ok: " + t.substring(0, 30);
+      // Count cells per y-position
+      var rowCounts = {};
+      var allCells = [];
+      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
+        var t = (el.innerText || "").trim();
+        var r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
+          var k = Math.round(r.top);
+          rowCounts[k] = (rowCounts[k] || 0) + 1;
+          allCells.push({el: el, top: k, text: t});
+        }
+      });
+      // Most common count per row = data columns
+      var freq = {};
+      Object.values(rowCounts).forEach(function(n) { freq[n] = (freq[n]||0)+1; });
+      var dataCols = parseInt(
+        Object.keys(freq).sort(function(a,b){ return freq[b]-freq[a]; })[0]
+      );
+      // Click the first cell that belongs to a full data row
+      for (var i = 0; i < allCells.length; i++) {
+        if (rowCounts[allCells[i].top] === dataCols) {
+          allCells[i].el.scrollIntoView({block: "nearest"});
+          allCells[i].el.focus();
+          allCells[i].el.click();
+          return "ok [" + dataCols + " cols]: " + allCells[i].text.substring(0,25);
         }
       }
-      return "no cell found";
+      return "no data cell found";
     })()
   ')
   Sys.sleep(0.4)
@@ -139,6 +158,18 @@ get_visible_rows <- function(b) {
   target_len <- as.integer(names(sort(table(row_lens), decreasing = TRUE))[1])
   data_rows  <- parsed[row_lens == target_len]
   do.call(rbind, lapply(data_rows, function(r) matrix(r, nrow = 1)))
+}
+
+# Fix UTF-8 mojibake: Power BI serves text with UTF-8 bytes rendered as Latin-1.
+# "RegulaÃ§Ã£o" → "Regulação": take each char's code-point as a raw byte, then
+# declare those bytes as UTF-8.
+fix_encoding <- function(x) {
+  if (is.na(x) || nchar(x) == 0L) return(x)
+  tryCatch({
+    z <- rawToChar(as.raw(utf8ToInt(x) %% 256L))
+    Encoding(z) <- "UTF-8"
+    z
+  }, error = function(e) x)
 }
 
 # Press ArrowDown n times to advance the virtual-scroll table.
@@ -232,7 +263,32 @@ df     <- as.data.frame(unique(df_raw), stringsAsFactors = FALSE)
 
 cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
 
-colnames(df) <- if (length(headers) == ncol(df)) headers else paste0("V", seq_len(ncol(df)))
+# ── Column names ─────────────────────────────────────────────────────────────
+col_names_known <- c("CNPJ_ERI", "Sigla_ERI", "Nome_ERI", "UF",
+                     "Abrangencia_ERI", "Data_inicio", "Data_atualizacao")
+if (length(headers) == ncol(df)) {
+  colnames(df) <- headers
+} else if (ncol(df) == length(col_names_known)) {
+  colnames(df) <- col_names_known
+} else {
+  colnames(df) <- paste0("V", seq_len(ncol(df)))
+  warning("Número de colunas (", ncol(df), ") não esperado. Renomear manualmente.")
+}
+
+# ── Fix encoding (UTF-8 mojibake) ────────────────────────────────────────────
+df[] <- lapply(df, function(col) sapply(col, fix_encoding, USE.NAMES = FALSE))
+
+# ── Fix CNPJ scientific notation (e.g. "2.07691E+13" → "20769100000000") ────
+if ("CNPJ_ERI" %in% colnames(df)) {
+  df$CNPJ_ERI <- sapply(df$CNPJ_ERI, function(x) {
+    if (grepl("[Ee]\\+", x)) {
+      formatC(as.numeric(x), format = "f", digits = 0, big.mark = "")
+    } else {
+      # Left-pad with zeros to 14 characters
+      formatC(x, width = 14, flag = "0")
+    }
+  }, USE.NAMES = FALSE)
+}
 
 cat("Total de linhas únicas:", nrow(df), "\n")
 print(head(df, 10))
