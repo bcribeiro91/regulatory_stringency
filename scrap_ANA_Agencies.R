@@ -81,18 +81,25 @@ get_headers <- function(b) {
 # Summary cards / nav tabs have fewer cells per row than the data table, so we
 # identify data rows as those matching the most common cells-per-row count.
 ensure_focus <- function(b) {
-  b$Runtime$evaluate(expression = '
+  # Get screen coordinates of the first cell in the first full data row.
+  # Returns coords so we can use a real CDP mouse click (more reliable than
+  # synthetic el.click() for giving Power BI's virtual-scroll table keyboard focus).
+  res <- b$Runtime$evaluate(expression = '
     (function() {
-      // Collect cells with their vertical centre (same logic as get_visible_rows)
       var allCells = [];
       document.querySelectorAll("[role=gridcell]").forEach(function(el) {
         var t = (el.innerText || "").trim();
         var r = el.getBoundingClientRect();
         if (r.width > 0 && r.height > 0 && t !== "Select Row") {
-          allCells.push({el: el, center: Math.round((r.top + r.bottom) / 2), text: t});
+          allCells.push({
+            center: Math.round((r.top + r.bottom) / 2),
+            cx    : Math.round((r.left + r.right) / 2),
+            cy    : Math.round((r.top + r.bottom) / 2),
+            text  : t
+          });
         }
       });
-      if (allCells.length === 0) return "no cells found";
+      if (allCells.length === 0) return JSON.stringify({found: false});
       allCells.sort(function(a, b) { return a.center - b.center; });
 
       // Group into rows by centre (12px tolerance)
@@ -114,55 +121,84 @@ ensure_focus <- function(b) {
         Object.keys(freq).sort(function(a,b){ return freq[b]-freq[a]; })[0]
       );
 
-      // Click first cell of the first full data row
+      // Return coordinates of the first cell in the first full data row
       for (var j = 0; j < rows.length; j++) {
         if (rows[j].length === dataCols) {
           var cell = rows[j][0];
-          cell.el.scrollIntoView({block: "nearest"});
-          cell.el.focus();
-          cell.el.click();
-          return "ok [" + dataCols + " cols]: " + cell.text.substring(0, 25);
+          return JSON.stringify({found: true, x: cell.cx, y: cell.cy,
+                                 cols: dataCols, text: cell.text.substring(0, 25)});
         }
       }
-      return "no data cell found";
+      return JSON.stringify({found: false});
     })()
   ')
+
+  info <- fromJSON(res$result$value)
+  if (isTRUE(info$found)) {
+    # Real CDP mouse events — reliably transfers keyboard focus to the table
+    b$Input$dispatchMouseEvent(type = "mousePressed",  x = info$x, y = info$y,
+                               button = "left", clickCount = 1L)
+    b$Input$dispatchMouseEvent(type = "mouseReleased", x = info$x, y = info$y,
+                               button = "left", clickCount = 1L)
+  }
   Sys.sleep(0.4)
+  invisible(info$found)
 }
 
 # Extract visible data rows as a character matrix.
-# Uses the vertical CENTRE of each cell (not its top) for row grouping, so that
-# vertically-centred short cells in tall rows align correctly with their neighbours.
+# PRIMARY: uses Power BI's own [role=row] DOM grouping — no coordinate math needed,
+#          so tall rows (long Nome_ERI wrapping to multiple lines) are handled correctly.
+# FALLBACK: centre-based position grouping if [role=row] yields nothing.
 get_visible_rows <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
-      var cells = [];
-      document.querySelectorAll("[role=gridcell]").forEach(function(el) {
-        var t = (el.innerText || "").trim();
-        var rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0 && t !== "Select Row") {
-          cells.push({
-            text  : t,
-            left  : Math.round(rect.left),
-            center: Math.round((rect.top + rect.bottom) / 2)
-          });
+      var byRow = [];
+
+      // ── PRIMARY: ARIA row structure ──────────────────────────────────────────
+      document.querySelectorAll("[role=row]").forEach(function(rowEl) {
+        if (rowEl.getBoundingClientRect().height === 0) return;
+        var cells = [];
+        rowEl.querySelectorAll("[role=gridcell]").forEach(function(el) {
+          var t = (el.innerText || "").trim();
+          if (t === "Select Row") return;
+          var r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0)
+            cells.push({text: t, left: r.left});
+        });
+        if (cells.length > 0) {
+          cells.sort(function(a, b) { return a.left - b.left; });
+          byRow.push(cells.map(function(c) { return c.text; }));
         }
       });
-      if (cells.length === 0) return JSON.stringify([]);
-      cells.sort(function(a, b) { return a.center - b.center || a.left - b.left; });
-      var rows = [], cur = [cells[0]];
-      for (var i = 1; i < cells.length; i++) {
-        if (Math.abs(cells[i].center - cur[0].center) <= 12) {
-          cur.push(cells[i]);
-        } else {
-          cur.sort(function(a, b) { return a.left - b.left; });
-          rows.push(cur.map(function(c) { return c.text; }));
-          cur = [cells[i]];
+
+      // ── FALLBACK: centre-based position grouping ─────────────────────────────
+      if (byRow.length === 0) {
+        var cells = [];
+        document.querySelectorAll("[role=gridcell]").forEach(function(el) {
+          var t = (el.innerText || "").trim();
+          var rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0 && t !== "Select Row")
+            cells.push({text: t, left: Math.round(rect.left),
+                        center: Math.round((rect.top + rect.bottom) / 2)});
+        });
+        if (cells.length === 0) return JSON.stringify([]);
+        cells.sort(function(a, b) { return a.center - b.center || a.left - b.left; });
+        var rows = [], cur = [cells[0]];
+        for (var i = 1; i < cells.length; i++) {
+          if (Math.abs(cells[i].center - cur[0].center) <= 12) {
+            cur.push(cells[i]);
+          } else {
+            cur.sort(function(a, b) { return a.left - b.left; });
+            rows.push(cur.map(function(c) { return c.text; }));
+            cur = [cells[i]];
+          }
         }
+        cur.sort(function(a, b) { return a.left - b.left; });
+        rows.push(cur.map(function(c) { return c.text; }));
+        byRow = rows;
       }
-      cur.sort(function(a, b) { return a.left - b.left; });
-      rows.push(cur.map(function(c) { return c.text; }));
-      return JSON.stringify(rows);
+
+      return JSON.stringify(byRow);
     })()
   ')
 
@@ -270,8 +306,8 @@ for (page in seq_len(max_pages)) {
 
   cur_sig <- paste(mat[nrow(mat), ], collapse = "|")
 
-  cat(sprintf("Pág %4d | %2d linhas | %d cols | Início: %-20s | Fim: %-20s\n",
-              page, nrow(mat), ncol(mat),
+  cat(sprintf("Pág %4d | %2d linhas | %d cols | stall=%d | Início: %-20s | Fim: %-20s\n",
+              page, nrow(mat), ncol(mat), stall_count,
               substr(mat[1,           1], 1, 20),
               substr(mat[nrow(mat),   1], 1, 20)))
 
@@ -305,7 +341,7 @@ cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
 # ── Column names ─────────────────────────────────────────────────────────────
 col_names_known <- c("Cod_IBGE", "UF", "Municipio", "CNPJ_ERI",
                      "Nome_ERI", "Sigla_ERI", "Abrangencia_ERI",
-                     "Data_inicio", "Data_validade")
+                     "Data_inicio", "Data_validade", "Servico")
 if (length(headers) == ncol(df)) {
   colnames(df) <- headers
 } else if (ncol(df) == length(col_names_known)) {
