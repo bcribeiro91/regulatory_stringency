@@ -189,7 +189,26 @@ press_arrow_down <- function(b, n = 18) {
   Sys.sleep(1)
 }
 
-# ── 3. GET COLUMN HEADERS (for naming only) ───────────────────────────────────
+# ── 3. NAVIGATE TO THE "Serviços" TAB ────────────────────────────────────────
+# The target table (Cód. IBGE | UF | Município | CNPJ ERI | ...) lives on the
+# "Serviços" tab. We click it by matching its exact text content.
+res_nav <- b$Runtime$evaluate(expression = '
+  (function() {
+    var cells = document.querySelectorAll("[role=gridcell]");
+    for (var i = 0; i < cells.length; i++) {
+      var t = (cells[i].innerText || "").trim();
+      if (t === "Serviços") {
+        cells[i].click();
+        return "clicked: Serviços";
+      }
+    }
+    return "tab Serviços not found";
+  })()
+')
+cat(res_nav$result$value, "\n")
+Sys.sleep(4)   # wait for the tab and its table to render
+
+# ── 4. GET COLUMN HEADERS (for naming only) ───────────────────────────────────
 headers <- character(0)
 for (.attempt in 1:5) {
   headers <- get_headers(b)
@@ -264,8 +283,8 @@ df     <- as.data.frame(unique(df_raw), stringsAsFactors = FALSE)
 cat("\nDimensões após consolidação:", nrow(df), "x", ncol(df), "\n")
 
 # ── Column names ─────────────────────────────────────────────────────────────
-col_names_known <- c("CNPJ_ERI", "Sigla_ERI", "Nome_ERI", "UF",
-                     "Abrangencia_ERI", "Data_inicio", "Data_atualizacao")
+col_names_known <- c("Cod_IBGE", "UF", "Municipio", "CNPJ_ERI",
+                     "Nome_ERI", "Sigla_ERI", "Abrangencia_ERI", "Data_inicio")
 if (length(headers) == ncol(df)) {
   colnames(df) <- headers
 } else if (ncol(df) == length(col_names_known)) {
@@ -279,15 +298,19 @@ if (length(headers) == ncol(df)) {
 df[] <- lapply(df, function(col) sapply(col, fix_encoding, USE.NAMES = FALSE))
 
 # ── Fix CNPJ scientific notation (e.g. "2.07691E+13" → "20769100000000") ────
+# CNPJ: fix scientific notation and pad to 14 digits
 if ("CNPJ_ERI" %in% colnames(df)) {
   df$CNPJ_ERI <- sapply(df$CNPJ_ERI, function(x) {
     if (grepl("[Ee]\\+", x)) {
       formatC(as.numeric(x), format = "f", digits = 0, big.mark = "")
     } else {
-      # Left-pad with zeros to 14 characters
       formatC(x, width = 14, flag = "0")
     }
   }, USE.NAMES = FALSE)
+}
+# Cód. IBGE: pad to 7 digits
+if ("Cod_IBGE" %in% colnames(df)) {
+  df$Cod_IBGE <- formatC(df$Cod_IBGE, width = 7, flag = "0")
 }
 
 cat("Total de linhas únicas:", nrow(df), "\n")
