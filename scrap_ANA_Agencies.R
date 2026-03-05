@@ -152,6 +152,36 @@ ensure_focus <- function(b) {
 get_visible_rows <- function(b) {
   res <- b$Runtime$evaluate(expression = '
     (function() {
+
+      // ── Clean text from a gridcell ────────────────────────────────────────────
+      // Power BI puts the display value in a child span[title] attribute.
+      // Using title avoids capturing hidden accessibility/tooltip text that bleeds
+      // into innerText and causes values from adjacent columns to appear merged
+      // (e.g. "Cuiabá\n61270471000104" appearing as a single cell value).
+      function cellText(el) {
+        // 1. child span with non-empty title attribute (untruncated clean value)
+        var spans = el.querySelectorAll("span[title]");
+        for (var si = 0; si < spans.length; si++) {
+          var tv = (spans[si].getAttribute("title") || "").trim();
+          if (tv.length > 0) return tv;
+        }
+        // 2. title on the cell element itself
+        var ct = (el.getAttribute("title") || "").trim();
+        if (ct.length > 0) return ct;
+        // 3. first child element text (avoids sibling tooltip elements)
+        if (el.firstElementChild) {
+          var ft = (el.firstElementChild.innerText || "").trim();
+          if (ft.length > 0) return ft;
+        }
+        // 4. last resort: first non-empty line of full innerText
+        var lines = (el.innerText || "").split("\n");
+        for (var li = 0; li < lines.length; li++) {
+          var ln = lines[li].trim();
+          if (ln.length > 0) return ln;
+        }
+        return "";
+      }
+
       var byRow = [];
 
       // ── PRIMARY: ARIA row structure ──────────────────────────────────────────
@@ -159,7 +189,7 @@ get_visible_rows <- function(b) {
         if (rowEl.getBoundingClientRect().height === 0) return;
         var cells = [];
         rowEl.querySelectorAll("[role=gridcell]").forEach(function(el) {
-          var t = (el.innerText || "").trim();
+          var t = cellText(el);
           if (t === "Select Row") return;
           var r = el.getBoundingClientRect();
           if (r.width > 0 && r.height > 0)
@@ -175,7 +205,7 @@ get_visible_rows <- function(b) {
       if (byRow.length === 0) {
         var cells = [];
         document.querySelectorAll("[role=gridcell]").forEach(function(el) {
-          var t = (el.innerText || "").trim();
+          var t = cellText(el);
           var rect = el.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0 && t !== "Select Row")
             cells.push({text: t, left: Math.round(rect.left),
@@ -352,7 +382,8 @@ if (length(headers) == ncol(df)) {
 }
 
 # ── Replace Power BI "########" (column too narrow to show date) with NA ─────
-df[df == "########" | (nchar(df) >= 2 & grepl("^#{2,}$", df))] <- NA
+# Note: df == "########" works element-wise on a data.frame; nchar(df) does not.
+df[!is.na(df) & df == "########"] <- NA
 
 # ── Fix encoding (UTF-8 mojibake) ────────────────────────────────────────────
 df[] <- lapply(df, function(col) sapply(col, fix_encoding, USE.NAMES = FALSE))
