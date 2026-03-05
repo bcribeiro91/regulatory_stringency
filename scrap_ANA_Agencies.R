@@ -65,7 +65,8 @@ get_headers <- function(b) {
       document.querySelectorAll("[role=columnheader]").forEach(function(el) {
         var r = el.getBoundingClientRect();
         var t = (el.innerText || "").trim();
-        if (r.width > 0 && r.height > 0 && t.length > 0 && t !== "Select Row" &&
+        if (r.width > 0 && r.height > 0 && t.length > 0 &&
+            t !== "Select Row" && t !== "Row Selection" &&
             r.top < firstDataY && r.top > firstDataY - 120) {
           headers.push({text: t, left: r.left});
         }
@@ -90,7 +91,7 @@ ensure_focus <- function(b) {
       document.querySelectorAll("[role=gridcell]").forEach(function(el) {
         var t = (el.innerText || "").trim();
         var r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && t !== "Select Row") {
+        if (r.width > 0 && r.height > 0 && t !== "Select Row" && t !== "Row Selection") {
           allCells.push({
             center: Math.round((r.top + r.bottom) / 2),
             cx    : Math.round((r.left + r.right) / 2),
@@ -174,7 +175,9 @@ get_visible_rows <- function(b) {
           if (ft.length > 0) return ft;
         }
         // 4. last resort: first non-empty line of full innerText
-        var lines = (el.innerText || "").split("\n");
+        // Note: use String.fromCharCode(10) instead of "\n" because R interprets
+        // \n inside single-quoted strings as a real newline before passing to JS.
+        var lines = (el.innerText || "").split(String.fromCharCode(10));
         for (var li = 0; li < lines.length; li++) {
           var ln = lines[li].trim();
           if (ln.length > 0) return ln;
@@ -190,7 +193,7 @@ get_visible_rows <- function(b) {
         var cells = [];
         rowEl.querySelectorAll("[role=gridcell]").forEach(function(el) {
           var t = cellText(el);
-          if (t === "Select Row") return;
+          if (t === "Select Row" || t === "Row Selection") return;
           var r = el.getBoundingClientRect();
           if (r.width > 0 && r.height > 0)
             cells.push({text: t, left: r.left});
@@ -207,7 +210,7 @@ get_visible_rows <- function(b) {
         document.querySelectorAll("[role=gridcell]").forEach(function(el) {
           var t = cellText(el);
           var rect = el.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && t !== "Select Row")
+          if (rect.width > 0 && rect.height > 0 && t !== "Select Row" && t !== "Row Selection")
             cells.push({text: t, left: Math.round(rect.left),
                         center: Math.round((rect.top + rect.bottom) / 2)});
         });
