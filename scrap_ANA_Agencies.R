@@ -14,15 +14,17 @@ if (!exists("b") || !inherits(b, "ChromoteSession")) {
   cat("Aguardando Power BI carregar...\n")
   Sys.sleep(12)
 } else {
-  tryCatch(
-    b$Runtime$evaluate(expression = "1"),
-    error = function(e) {
-      message("Sessão fechada — reconectando...")
-      b <<- b$respawn()
-      b$Page$navigate(PBI_URL)
-      Sys.sleep(12)
-    }
-  )
+  # Always re-navigate to ensure we land on the correct page (pageName= in URL)
+  tryCatch({
+    b$Page$navigate(PBI_URL)
+    cat("Aguardando Power BI carregar...\n")
+    Sys.sleep(12)
+  }, error = function(e) {
+    message("Sessão fechada — reconectando...")
+    b <<- b$respawn()
+    b$Page$navigate(PBI_URL)
+    Sys.sleep(12)
+  })
 }
 
 # ── 2. HELPER FUNCTIONS ───────────────────────────────────────────────────────
