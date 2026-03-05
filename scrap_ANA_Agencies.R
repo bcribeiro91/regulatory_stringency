@@ -9,12 +9,12 @@ library(jsonlite)
 # If b already exists and is active, skip this block.
 # Otherwise, launch a new session and navigate to the page:
 #
-#   b <- ChromoteSession$new()
-#   b$Page$navigate("https://app.powerbi.com/view?r=eyJrIjoiYWY2NDlhZjktNjZlYy00ZjE3LThmZGYtODUyNjA4OGUwYzU2IiwidCI6ImUwYmI0MDEyLTgxMGItNDY5YS04YjRkLTY2N2ZjZDFiYWY4OCJ9")
-#   Sys.sleep(10)  # wait for Power BI to fully render
-#
-# If the session was closed, respawn it:
-#   b <- b$respawn()
+  b <- ChromoteSession$new()
+  b$Page$navigate("https://app.powerbi.com/view?r=eyJrIjoiYWY2NDlhZjktNjZlYy00ZjE3LThmZGYtODUyNjA4OGUwYzU2IiwidCI6ImUwYmI0MDEyLTgxMGItNDY5YS04YjRkLTY2N2ZjZDFiYWY4OCJ9")
+  Sys.sleep(10)  # wait for Power BI to fully render
+
+#If the session was closed, respawn it:
+  b <- b$respawn()
 
 # ── 2. HELPER FUNCTIONS ───────────────────────────────────────────────────────
 
