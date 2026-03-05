@@ -190,23 +190,42 @@ press_arrow_down <- function(b, n = 18) {
 }
 
 # ── 3. NAVIGATE TO THE "Serviços" TAB ────────────────────────────────────────
-# The target table (Cód. IBGE | UF | Município | CNPJ ERI | ...) lives on the
-# "Serviços" tab. We click it by matching its exact text content.
+# Try multiple selectors to find and click the tab, then verify the correct
+# table is loaded (confirmed by "Cód. IBGE" appearing in the column headers).
 res_nav <- b$Runtime$evaluate(expression = '
   (function() {
-    var cells = document.querySelectorAll("[role=gridcell]");
-    for (var i = 0; i < cells.length; i++) {
-      var t = (cells[i].innerText || "").trim();
-      if (t === "Serviços") {
-        cells[i].click();
-        return "clicked: Serviços";
+    var target = "Servi\u00e7os";   // "Serviços"
+    var selectors = ["[role=gridcell]","[role=button]","[role=tab]","button","div","span"];
+    for (var si = 0; si < selectors.length; si++) {
+      var els = document.querySelectorAll(selectors[si]);
+      for (var i = 0; i < els.length; i++) {
+        var t = (els[i].innerText || els[i].textContent || "").trim();
+        if (t === target) {
+          els[i].dispatchEvent(new MouseEvent("mousedown", {bubbles: true, cancelable: true}));
+          els[i].dispatchEvent(new MouseEvent("mouseup",   {bubbles: true, cancelable: true}));
+          els[i].click();
+          return "clicked via " + selectors[si];
+        }
       }
     }
-    return "tab Serviços not found";
+    return "NOT FOUND — check selector";
   })()
 ')
-cat(res_nav$result$value, "\n")
-Sys.sleep(4)   # wait for the tab and its table to render
+cat("Nav result:", res_nav$result$value, "\n")
+Sys.sleep(6)   # give Power BI time to render the new tab content
+
+# Verify we landed on the right page (look for "Cód. IBGE" in the DOM)
+res_verify <- b$Runtime$evaluate(expression = '
+  (function() {
+    var txt = document.body.innerText || "";
+    return JSON.stringify({
+      on_servicos : txt.indexOf("Servi") >= 0,
+      has_cod_ibge: txt.indexOf("d. IBGE") >= 0,   // "Cód. IBGE"
+      n_gridcells : document.querySelectorAll("[role=gridcell]").length
+    });
+  })()
+')
+cat("Verificação:", res_verify$result$value, "\n")
 
 # ── 4. GET COLUMN HEADERS (for naming only) ───────────────────────────────────
 headers <- character(0)
