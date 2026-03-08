@@ -133,7 +133,7 @@ print("Helpers defined OK")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CELL 4 — Async DOM scraper  (iframe-aware mouse-wheel scroll)
+# CELL 4 — Async DOM scraper  (JS scrollTop + mouse-wheel, iframe-aware)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── JavaScript snippets ───────────────────────────────────────────────────────
@@ -165,8 +165,41 @@ _ROWS_JS = """() => {
     return rows;
 }"""
 
-# Dispatch a real WheelEvent inside the frame — secondary scroll trigger.
-# (isTrusted:false events are accepted by most React-based apps including PBI.)
+# PRIMARY scroll: JS scrollTop on PBI table container, or the page element
+# with the largest scrollable height (sidebar / report wrapper).
+# Confirmed in earlier sessions: scrolling the sidebar fallback (sh≈25801)
+# triggers Power BI's virtual table to load new rows, even though the element
+# scrolled is not the table itself — PBI listens for page-level scroll events.
+_SCROLL_JS = """(delta) => {
+    const selectors = [
+        '.tableEx-scroll-wrapper',
+        '.scroll-wrapper',
+        'div[class*="scroll"][role="presentation"]',
+        '[data-testid="visual-scroll-wrapper"]',
+        '[role="grid"]',
+        '[role="rowgroup"]',
+    ];
+    for (const s of selectors) {
+        const el = document.querySelector(s);
+        if (el && el.scrollHeight > el.clientHeight) {
+            el.scrollTop += delta;
+            return 'scrollTop(' + s + '): ' + el.scrollTop;
+        }
+    }
+    // Fallback: element with maximum scrollable height (page sidebar / wrapper).
+    let best = null, bestH = 0;
+    document.querySelectorAll('*').forEach(el => {
+        const sh = el.scrollHeight - el.clientHeight;
+        if (sh > bestH) { bestH = sh; best = el; }
+    });
+    if (best) {
+        best.scrollTop += delta;
+        return 'scrollTop fallback (sh=' + bestH + '): ' + best.scrollTop;
+    }
+    return 'no scrollable element';
+}"""
+
+# SECONDARY scroll: WheelEvent dispatched inside the frame JS context.
 _WHEEL_JS = """(delta) => {
     const targets = [
         document.querySelector('[role=rowgroup]'),
@@ -202,9 +235,6 @@ async def _get_table_frame(page):
     IMPORTANT: Playwright's frame.locator().bounding_box() returns coordinates
     in the *frame's own* coordinate space — NOT page coordinates.
     To convert frame coords → page coords we must add the iframe's page offset.
-    This was the root cause of the previous scroll bug: wheel events were sent
-    at (726, 92) page-coords, which was actually the page header/chrome area,
-    not the table body.
     """
     # 1. Check main page first (no iframe overhead)
     try:
@@ -276,21 +306,21 @@ async def _find_scroll_coords(tf, iframe_x, iframe_y):
 
 async def run_scraper():
     """
-    DOM-based extraction with iframe-aware mouse-wheel scroll.
+    DOM-based extraction with three layered scroll strategies:
 
-    Algorithm:
-      1. Load the Power BI report and wait for initial render.
-      2. Find the table iframe; compute its page-level (x, y) offset.
-      3. Locate a scroll target in the table DATA area (below the header row).
-         This is the critical fix: frame-relative coords + iframe offset =
-         correct page coords for page.mouse.wheel().
-      4. Click to focus the table, then loop:
-           a. Evaluate _ROWS_JS inside the frame → list of visible rows.
-           b. Add any new (unseen) rows to the collection.
-           c. Send page.mouse.wheel() at the correct page coordinates.
-           d. Also dispatch a WheelEvent via JS inside the frame (belt+suspenders
-              in case the mouse event is swallowed by a transparent overlay).
-      5. Stop when MAX_STALE consecutive iterations yield no new rows.
+      1. JS scrollTop (_SCROLL_JS) — PRIMARY.
+         Scrolls the Power BI table container if found, otherwise falls back to
+         the page element with the largest scrollable height (typically the
+         sidebar/report wrapper).  In earlier sessions this fallback was the
+         *only* method that caused the virtual table to load new rows — Power BI
+         appears to refresh its virtual table in response to page-level scroll
+         events, even when the scrolled element is not the table itself.
+
+      2. WheelEvent via JS (_WHEEL_JS) — SECONDARY.
+         Dispatched on [role=rowgroup] / [role=grid] inside the frame.
+
+      3. Real OS mouse wheel (page.mouse.wheel) — TERTIARY.
+         Sent at the correct page-level coordinates (iframe offset + frame bbox).
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -337,10 +367,10 @@ async def run_scraper():
         seen: set  = set()
         all_rows   = []
         stale      = 0
-        MAX_STALE  = 50   # ~10 seconds of no new rows → assume table exhausted
+        MAX_STALE  = 60   # ~15 s of no new rows → assume table exhausted
 
-        for it in range(800):
-            # Read currently rendered gridcell rows from the frame DOM
+        for it in range(600):
+            # Read currently rendered gridcell rows from the DOM
             visible = await tf.evaluate(_ROWS_JS)
             added = 0
             for row in visible:
@@ -357,20 +387,23 @@ async def run_scraper():
             else:
                 stale += 1
                 if stale >= MAX_STALE:
-                    print(f"\n  {MAX_STALE} consecutive stale iterations — "
-                          f"table fully loaded.  Total rows: {len(all_rows)}")
+                    print(f"\n  {MAX_STALE} consecutive stale — done. "
+                          f"Total rows: {len(all_rows)}")
                     break
 
-            # Primary scroll: real mouse wheel event at correct page coordinates.
-            # page.mouse.move() then page.mouse.wheel(delta_x, delta_y)
+            # 1. JS scrollTop — primary (works via PBI's page-scroll listener)
+            scroll_msg = await tf.evaluate(_SCROLL_JS, 300)
+            if it < 5 or (stale > 0 and stale % 20 == 0):
+                print(f"  scroll[{it}]: {scroll_msg}")
+
+            # 2. WheelEvent via JS — secondary
+            await tf.evaluate(_WHEEL_JS, 300)
+
+            # 3. Real mouse wheel at correct page coords — tertiary
             await page.mouse.move(scroll_x, scroll_y)
             await page.mouse.wheel(0, 300)
 
-            # Secondary scroll: WheelEvent dispatched from inside the frame JS.
-            # Helps when a transparent overlay swallows the page-level event.
-            await tf.evaluate(_WHEEL_JS, 300)
-
-            await page.wait_for_timeout(200)
+            await page.wait_for_timeout(250)
 
         await browser.close()
 
