@@ -240,6 +240,89 @@ _HEADER_JS = """() => Array.from(
 
 # ── Helper coroutines ─────────────────────────────────────────────────────────
 
+async def _try_clear_filters(page):
+    """
+    Attempt to clear all active filters / slicers on the current Power BI page
+    so the full underlying dataset is exposed.
+
+    Power BI public embeds can have:
+      - A "Reset to default" button in the top toolbar (resets all user filters)
+      - A filter pane (right side) with per-field clear buttons
+      - Slicers visible on the canvas with an "Erase" / "Clear selection" button
+
+    Returns True if at least one control was successfully clicked.
+    """
+    cleared = []
+
+    # 1. "Reset to default" toolbar button — clears all user-applied changes
+    for sel in [
+        'button[aria-label="Reset to default"]',
+        'button[title="Reset to default"]',
+        'button[aria-label*="Reset" i][aria-label*="default" i]',
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.click(timeout=5_000)
+                cleared.append(f"reset-default ({sel})")
+                await page.wait_for_timeout(4_000)
+                break
+        except Exception:
+            pass
+
+    # 2. Filter pane → open it → click "Clear all"
+    for pane_sel in [
+        'button[aria-label="Filters pane"]',
+        'button[aria-label="Filters"]',
+        'button[aria-label*="filter" i]',
+    ]:
+        try:
+            pane = page.locator(pane_sel).first
+            if await pane.count() > 0:
+                await pane.click(timeout=3_000)
+                await page.wait_for_timeout(1_000)
+                for clear_sel in [
+                    '[aria-label*="Clear all" i]',
+                    '[title*="Clear all" i]',
+                ]:
+                    cb = page.locator(clear_sel).first
+                    if await cb.count() > 0:
+                        await cb.click(timeout=3_000)
+                        cleared.append("filter-pane clear-all")
+                        await page.wait_for_timeout(3_000)
+                        break
+                break
+        except Exception:
+            pass
+
+    # 3. Visible slicer "Erase" / "Clear selection" buttons on the canvas
+    for erase_sel in [
+        'button[aria-label="Erase"]',
+        'button[title="Erase"]',
+        'button[aria-label*="erase" i]',
+        '[aria-label*="Clear selection" i]',
+    ]:
+        try:
+            locs = page.locator(erase_sel)
+            n = await locs.count()
+            for i in range(n):
+                try:
+                    await locs.nth(i).click(timeout=2_000)
+                    cleared.append(f"slicer-erase[{i}]")
+                    await page.wait_for_timeout(1_000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if cleared:
+        print(f"  Cleared filter controls: {cleared}")
+    else:
+        print("  No filter controls found (data may already be unfiltered, "
+              "or controls use non-standard selectors).")
+    return bool(cleared)
+
+
 async def _get_table_frame(page):
     """
     Find the frame (iframe or main page) that contains the Power BI table.
@@ -355,6 +438,13 @@ async def run_scraper():
         print("Loading report (45 s)…")
         await page.goto(PBI_URL, timeout=90_000)
         await page.wait_for_timeout(45_000)
+
+        # ── Clear active filters to expose the full dataset ───────────────────
+        print("\nClearing active filters…")
+        filters_cleared = await _try_clear_filters(page)
+        if filters_cleared:
+            print("  Waiting 10 s for table to reload with unfiltered data…")
+            await page.wait_for_timeout(10_000)
 
         # ── Locate table frame & iframe page offset ───────────────────────────
         print("\nLocating table frame…")
