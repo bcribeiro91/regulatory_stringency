@@ -90,9 +90,23 @@ def clean_dataframe(df):
     Rename Portuguese DOM column headers to English, clean CNPJ / Cod_IBGE,
     normalise dates, and deduplicate.
     """
+    # Safety: if columns are integers (header matching failed in run_scraper),
+    # apply the positional fallback mapping so downstream string ops don't crash.
+    if all(isinstance(c, (int, float)) for c in df.columns):
+        nc = len(df.columns)
+        _POS = {
+            10: ["Row_Selection","Cod_IBGE","UF","Municipio","CNPJ_ERI",
+                 "Nome_ERI","Sigla_ERI","Abrangencia_ERI","Data_inicio","Setorialidade"],
+            11: ["Row_Selection","Cod_IBGE","UF","Municipio","CNPJ_ERI",
+                 "Nome_ERI","Sigla_ERI","Abrangencia_ERI","Data_inicio",
+                 "Data_validade","Setorialidade"],
+        }
+        df.columns = _POS.get(nc, [f"Col{i}" for i in range(nc)])
+        print(f"  Applied positional column names ({nc} cols)")
+
     # Drop Power BI row-selection UI column if present
     for col in list(df.columns):
-        if col in ("Row Selection", "Select Row"):
+        if col in ("Row Selection", "Select Row", "Row_Selection"):
             df = df.drop(columns=[col])
 
     # Rename Portuguese headers → English
@@ -106,7 +120,7 @@ def clean_dataframe(df):
             df[col] = df[col].apply(_clean_date)
 
     # Clean CNPJ → 14 digits, zero-padded
-    for col in [c for c in df.columns if "CNPJ" in c.upper()]:
+    for col in [c for c in df.columns if isinstance(c, str) and "CNPJ" in c.upper()]:
         df[col] = df[col].apply(
             lambda x: None
             if (x is None or str(x).strip() == "" or
@@ -145,7 +159,7 @@ _ROWS_JS = """() => {
         const r = el.getBoundingClientRect();
         if (r.width > 0 && r.height > 0) {
             const t = (el.getAttribute('title') || el.innerText || '').trim();
-            if (t) cells.push({ text: t, top: Math.round(r.top), left: Math.round(r.left) });
+            cells.push({ text: t, top: Math.round(r.top), left: Math.round(r.left) });
         }
     });
     if (!cells.length) return [];
@@ -367,7 +381,7 @@ async def run_scraper():
         seen: set  = set()
         all_rows   = []
         stale      = 0
-        MAX_STALE  = 60   # ~15 s of no new rows → assume table exhausted
+        MAX_STALE  = 80   # ~20 s gap is safe; prior run had a 55-iter silent gap
 
         for it in range(600):
             # Read currently rendered gridcell rows from the DOM
@@ -424,9 +438,42 @@ async def run_scraper():
     data_rows  = [r for r in data_rows if len(r) == target_len]
     print(f"After length filter (len={target_len}): {len(data_rows)} rows")
 
-    # Build DataFrame with DOM column headers if they match, else generic names
-    if headers and len(headers) == target_len:
-        return pd.DataFrame(data_rows, columns=headers)
+    # ── Assign column names ───────────────────────────────────────────────────
+    col_names = None
+    if headers:
+        if len(headers) == target_len:
+            # Perfect match — use DOM headers directly
+            col_names = headers
+        elif len(headers) == target_len + 1:
+            # One column is absent from most rows (typically 'Data do fim da
+            # delegação' when the end-date cell renders as invisible/empty).
+            # Drop it so the headers align with the shorter rows.
+            for skip in ["Data do fim da delegação", "Data do início da delegação"]:
+                trimmed = [h for h in headers if h != skip]
+                if len(trimmed) == target_len:
+                    col_names = trimmed
+                    print(f"  Adjusted headers: dropped '{skip}' "
+                          f"to match row length {target_len}")
+                    break
+
+    if col_names is None:
+        # Positional fallback: well-known layouts by column count
+        _FALLBACK = {
+            10: ["Row_Selection","Cod_IBGE","UF","Municipio","CNPJ_ERI",
+                 "Nome_ERI","Sigla_ERI","Abrangencia_ERI","Data_inicio","Setorialidade"],
+            11: ["Row_Selection","Cod_IBGE","UF","Municipio","CNPJ_ERI",
+                 "Nome_ERI","Sigla_ERI","Abrangencia_ERI","Data_inicio",
+                 "Data_validade","Setorialidade"],
+        }
+        col_names = _FALLBACK.get(target_len)
+        if col_names:
+            print(f"  Applied positional fallback column names ({target_len} cols)")
+        else:
+            print(f"  WARNING: no column-name mapping for len={target_len}; "
+                  f"using positional integers")
+
+    if col_names:
+        return pd.DataFrame(data_rows, columns=col_names)
     return pd.DataFrame(data_rows)
 
 
